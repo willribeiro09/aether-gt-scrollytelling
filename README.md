@@ -95,14 +95,23 @@ No desktop, ↓/↑, PageDown/Up e espaço conduzem a apresentação pelas mesma
 - **Draw em RAF**: no máximo um `drawImage` por animation frame no touch.
 - **NUNCA usar `touchMultiplier`** no Lenis — crasha o Safari. Para o swipe
   render mais, reduza `PX_PER_FRAME` (encurta a pista de scroll).
-- **Orçamento de memória iOS**: frames decodificados vivem na RAM/GPU. O set
-  completo em resolução total (240 × 720×1280 × 4 B ≈ 885 MB) estoura o limite
-  por aba do Safari e o iOS mata a página ("um problema ocorreu repetidamente").
-  No touch a engine usa **1 a cada 2 frames** (`FRAME_STEP = 2`) decodificados a
-  **75%** (`CANVAS_SCALE = 0.75`) → ≈ 250 MB. Como o playback é guiado pelo
-  scroll, a cadência menor da fonte é imperceptível. Se um vídeo futuro tiver
-  mais frames ou resolução maior, ajuste esses dois knobs para manter o total
-  decodificado em ~250 MB (`slots × largura × altura × 4 bytes`).
+- **Orçamento de memória iOS — janela deslizante**: frames decodificados vivem
+  na RAM/GPU. O set completo em resolução total (240 × 720×1280 × 4 B ≈ 885 MB)
+  estoura o limite por aba do Safari e o iOS mata a página ("um problema
+  ocorreu repetidamente"). Cortar frames (step 2) resolvia a memória mas
+  derrubava a cadência da fonte para 12 fps — sensação de FPS baixo. A solução
+  atual no touch: **todos os frames** (24 fps de fonte) a 75% de resolução,
+  com apenas uma **janela deslizante de ~70 frames decodificada por vez**
+  (~140 MB, verificado): fora dela os `ImageBitmap` são fechados e
+  redecodificados sob demanda — os WebP ficam no cache HTTP (aquecido em
+  levas no load) e o decode do iOS é por hardware.
+- **Crossfade adaptativo por velocidade**: o scroll mapeia para um slot
+  fracionário; em movimento lento o canvas mescla os dois frames vizinhos
+  (mata o degrau no fim da inércia), em movimento rápido mostra o frame mais
+  próximo, nítido (mesclar em velocidade cria ghosting que parece FPS baixo).
+  Transição por smoothstep entre `V_LO = 0.15` e `V_HI = 0.45` slots/frame,
+  com média móvel para não tremular. Debug: `window.__paint` (v, w, f) e
+  `window.__cacheSize()`.
 
 ### Knobs de sensação
 

@@ -472,16 +472,20 @@
       // Sensitivity knob: lower PX_PER_FRAME on touch = each swipe covers more.
       // (NEVER use Lenis touchMultiplier for this — it crashes Safari.)
       const PX_PER_FRAME   = IS_TOUCH ? 9 : 30;
-      const PRELOAD_AHEAD  = 40;
-      const PRELOAD_BEHIND = 10;
+      const PRELOAD_AHEAD  = IS_TOUCH ? 48 : 40;
+      const PRELOAD_BEHIND = IS_TOUCH ? 12 : 10;
       const INITIAL_BATCH  = 30;
-      // ORÇAMENTO DE MEMÓRIA iOS: frames decodificados vivem na RAM/GPU. O set
-      // completo em resolução total (240 × 720×1280 × 4B ≈ 885 MB) estoura o
-      // limite por aba do Safari e o iOS mata a página ("um problema ocorreu
-      // repetidamente"). No touch: 1 a cada 2 frames, decodificados a 75% —
-      // ~120 × 540×960 × 4B ≈ 250 MB. Como o playback é guiado pelo scroll,
-      // a menor cadência da fonte é imperceptível.
-      const FRAME_STEP     = IS_TOUCH ? 2 : 1;
+      // ORÇAMENTO DE MEMÓRIA iOS: frames decodificados vivem na RAM/GPU. Manter
+      // TODOS decodificados em resolução total (240 × 720×1280 × 4B ≈ 885 MB)
+      // estoura o limite por aba do Safari e o iOS mata a página ("um problema
+      // ocorreu repetidamente"). Cortar frames (step 2) resolvia a memória mas
+      // derrubava a cadência da fonte p/ 12fps — sensação de FPS baixo.
+      // Estratégia atual no touch: TODOS os frames (24fps de fonte, fluidez
+      // real) a 75% de resolução, mas só uma JANELA deslizante de ~70 frames
+      // decodificada por vez (~150 MB); fora dela os bitmaps são fechados e
+      // redecodificados sob demanda (o WebP fica no cache HTTP; o decode do
+      // iOS é por hardware e acompanha o scroll).
+      const FRAME_STEP     = 1;
       const CANVAS_SCALE   = IS_TOUCH ? 0.75 : 1.0;
       const CANVAS_W       = Math.round(FRAME_W * CANVAS_SCALE);
       const CANVAS_H       = Math.round(FRAME_H * CANVAS_SCALE);
@@ -505,6 +509,7 @@
 
       const cache = new Map();
       let pendingFrame = null;
+      window.__cacheSize = () => cache.size; // debug: teto da janela deslizante
 
       function loadFrame(slot) {
         if (slot < 0 || slot >= N_SLOTS || cache.has(slot)) return;
@@ -513,6 +518,11 @@
         cache.set(slot, entry);
         const markReady = (source) => {
           if (entry.ready) return;
+          // a entrada pode ter sido evictada enquanto decodificava — não vaza
+          if (cache.get(slot) !== entry) {
+            if (source && source.close) source.close();
+            return;
+          }
           entry.source = source;
           entry.ready = true;
           entry.img = null; // release the Image; only the bitmap stays resident
@@ -537,11 +547,14 @@
 
       function preloadWindow(center) {
         for (let i = center - PRELOAD_BEHIND; i <= center + PRELOAD_AHEAD; i++) loadFrame(i);
-        if (!IS_TOUCH) {
-          for (const [key] of cache) {
-            if (key < center - PRELOAD_BEHIND - 5 || key > center + PRELOAD_AHEAD + 5) {
-              cache.delete(key);
-            }
+        // janela deslizante: fora dela, libera o bitmap (GPU) e a entrada.
+        // Margem de 10 slots de histerese para não debater na borda.
+        const lo = center - PRELOAD_BEHIND - 10;
+        const hi = center + PRELOAD_AHEAD + 10;
+        for (const [key, entry] of cache) {
+          if (key < lo || key > hi) {
+            if (entry.source && entry.source.close) entry.source.close();
+            cache.delete(key);
           }
         }
       }
@@ -555,12 +568,33 @@
       let _rafTarget  = 0;
       let _rafPending = false;
       let lastSlotF   = 0;
+      let _prevSlotF  = 0, _prevT = 0, _vEma = 0;
 
       function paint(slotF) {
+        // velocidade (slots por frame de 60Hz, suavizada por média móvel):
+        // decide entre nitidez e dissolve.
+        const now = performance.now();
+        if (_prevT) {
+          const inst = Math.abs(slotF - _prevSlotF) / Math.max(8, now - _prevT) * 16.7;
+          _vEma += (inst - _vEma) * 0.25;
+        }
+        _prevSlotF = slotF; _prevT = now;
         lastSlotF = slotF;
+
+        // Peso do crossfade: 1 quando lento (mata o degrau do fim da inércia),
+        // 0 quando rápido (frame mais próximo, NÍTIDO — mesclar em alta
+        // velocidade cria bordas duplas/ghosting que parecem FPS baixo).
+        // Com todos os frames (step 1), acima de V_HI o modo nítido já troca
+        // frame a ≥24 Hz — motion cinematográfico de verdade.
+        const V_LO = 0.15, V_HI = 0.45;
+        let w = 1 - Math.min(1, Math.max(0, (_vEma - V_LO) / (V_HI - V_LO)));
+        w = w * w * (3 - 2 * w); // smoothstep
+
         const i0 = Math.max(0, Math.min(N_SLOTS - 1, Math.floor(slotF)));
         const i1 = Math.min(N_SLOTS - 1, i0 + 1);
-        const f  = slotF - i0;
+        const fRaw = slotF - i0;
+        const f = fRaw * w + Math.round(fRaw) * (1 - w);
+        window.__paint = { v: +_vEma.toFixed(4), w: +w.toFixed(3), f: +f.toFixed(3), slotF: +slotF.toFixed(2) };
         const e0 = cache.get(i0), e1 = cache.get(i1);
         const r0 = e0 && e0.ready, r1 = e1 && e1.ready;
         if (!r0 && !r1) { pendingFrame = i0; return; }
@@ -613,7 +647,15 @@
         const img = new Image();
         const entry = { img, ready: false };
         cache.set(s, entry);
-        const done = (source) => { entry.source = source; entry.ready = true; entry.img = null; onInitialLoad(); };
+        const done = (source) => {
+          if (cache.get(s) !== entry) { // evictado durante o decode — não vaza
+            if (source && source.close) source.close();
+            onInitialLoad();
+            return;
+          }
+          entry.source = source; entry.ready = true; entry.img = null;
+          onInitialLoad();
+        };
         img.onload = () => {
           if (IS_TOUCH && window.createImageBitmap) {
             createImageBitmap(img, {
@@ -920,11 +962,21 @@
         // pad timeline to exactly 1.0 so scrub maps 1:1 with frame progress
         tl.to({}, { duration: 0.0001 }, 1.0);
 
-        // Preload ALL remaining slots so none is ever missing at any scroll speed
-        (function sweep(start) {
+        // Desktop: pré-carrega tudo (Images leves; o browser gerencia decode).
+        // Touch NÃO faz sweep: a janela deslizante define o working set e os
+        // WebP ficam no cache HTTP para redecode instantâneo.
+        if (!IS_TOUCH) (function sweep(start) {
           const end = Math.min(start + 9, N_SLOTS - 1);
           for (let s = start; s <= end; s++) loadFrame(s);
           if (end < N_SLOTS - 1) setTimeout(() => sweep(end + 1), 40);
+        })(INITIAL_BATCH);
+        // Touch: aquece o cache HTTP de todos os frames (bytes comprimidos,
+        // ~8 MB) sem decodificar, em levas — flicks longos redecodificam
+        // direto do cache, sem rede.
+        else (function warm(start) {
+          const end = Math.min(start + 9, N_SLOTS - 1);
+          for (let s = start; s <= end; s++) fetch(FRAME_PATH(FRAME_INDICES[s])).catch(() => {});
+          if (end < N_SLOTS - 1) setTimeout(() => warm(end + 1), 120);
         })(INITIAL_BATCH);
       }
     })();

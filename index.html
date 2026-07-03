@@ -516,7 +516,11 @@
           entry.source = source;
           entry.ready = true;
           entry.img = null; // release the Image; only the bitmap stays resident
-          if (pendingFrame === slot) { pendingFrame = null; scheduleFrame(slot); }
+          // repinta se este frame participa da mescla atual
+          if (pendingFrame === slot || Math.abs(slot - lastSlotF) <= 1) {
+            pendingFrame = null;
+            scheduleFrame(lastSlotF);
+          }
         };
         img.onload = () => {
           if (IS_TOUCH && window.createImageBitmap) {
@@ -542,28 +546,45 @@
         }
       }
 
-      // RAF-batched draw: at most one drawImage per animation frame.
-      let _rafTarget = null;
+      // RAF-batched draw com crossfade sub-frame: o scroll mapeia para um slot
+      // FRACIONÁRIO; desenhamos o frame de baixo e mesclamos o de cima com
+      // globalAlpha. Isso elimina o "degrau" visível de frames no rabo lento
+      // da inércia — o movimento vira um dissolve contínuo em qualquer
+      // velocidade. Máximo de dois drawImage (GPU) por animation frame,
+      // ainda limitado a uma pintura por RAF.
+      let _rafTarget  = 0;
       let _rafPending = false;
-      function scheduleFrame(index) {
-        _rafTarget = index;
-        if (_rafPending) return;
-        _rafPending = true;
-        requestAnimationFrame(() => {
-          _rafPending = false;
-          const entry = cache.get(_rafTarget);
-          if (!entry || !entry.ready) { pendingFrame = _rafTarget; return; }
-          if (pendingFrame === _rafTarget) pendingFrame = null;
-          ctx.drawImage(entry.source, 0, 0, CANVAS_W, CANVAS_H);
-        });
+      let lastSlotF   = 0;
+
+      function paint(slotF) {
+        lastSlotF = slotF;
+        const i0 = Math.max(0, Math.min(N_SLOTS - 1, Math.floor(slotF)));
+        const i1 = Math.min(N_SLOTS - 1, i0 + 1);
+        const f  = slotF - i0;
+        const e0 = cache.get(i0), e1 = cache.get(i1);
+        const r0 = e0 && e0.ready, r1 = e1 && e1.ready;
+        if (!r0 && !r1) { pendingFrame = i0; return; }
+        pendingFrame = null;
+        if (r0) {
+          ctx.drawImage(e0.source, 0, 0, CANVAS_W, CANVAS_H);
+          if (r1 && i1 !== i0 && f > 0.02) {
+            ctx.globalAlpha = f;
+            ctx.drawImage(e1.source, 0, 0, CANVAS_W, CANVAS_H);
+            ctx.globalAlpha = 1;
+          }
+        } else {
+          ctx.drawImage(e1.source, 0, 0, CANVAS_W, CANVAS_H);
+        }
       }
 
-      function drawFrame(index) {
-        const entry = cache.get(index);
-        if (!entry || !entry.ready) { pendingFrame = index; return; }
-        if (pendingFrame === index) pendingFrame = null;
-        ctx.drawImage(entry.source, 0, 0, CANVAS_W, CANVAS_H);
+      function scheduleFrame(slotF) {
+        _rafTarget = slotF;
+        if (_rafPending) return;
+        _rafPending = true;
+        requestAnimationFrame(() => { _rafPending = false; paint(_rafTarget); });
       }
+
+      function drawFrame(slotF) { paint(slotF); }
 
       let loaded = 0;
       let loadErrors = 0;
@@ -709,8 +730,8 @@
           const dist = Math.abs(pTarget - progressNow());
           glideActive = true;
           lenis.scrollTo(pTarget * scrollMax(), {
-            duration: Math.min(2, 0.6 + dist * 6),
-            easing: (t) => 1 - Math.pow(1 - t, 4),
+            duration: Math.min(1.6, 0.5 + dist * 5),
+            easing: (t) => 1 - Math.pow(1 - t, 3),
             onComplete: () => { glideActive = false; },
           });
         }
@@ -785,18 +806,20 @@
         ScrollTrigger.create({
           trigger: '#spacer', start: 'top top', end: 'bottom bottom', scrub: true,
           onUpdate(self) {
-            const target = Math.max(0, Math.min(N_SLOTS - 1,
-              Math.round(self.progress * (N_SLOTS - 1))));
-            if (target !== currentSlot) {
-              currentSlot = target;
-              preloadWindow(currentSlot);
-              // Desktop: draw immediately so the canvas lands on the same tick as
-              // the GSAP overlays (kills the one-frame settle hitch). Touch: keep
-              // the rAF-batched draw — capping to one full-res drawImage per frame
-              // is what keeps Safari from overloading and crashing on fast scroll.
-              if (IS_TOUCH) scheduleFrame(currentSlot);
-              else          drawFrame(currentSlot);
+            const slotF = Math.max(0, Math.min(N_SLOTS - 1,
+              self.progress * (N_SLOTS - 1)));
+            const slotI = Math.round(slotF);
+            if (slotI !== currentSlot) {
+              currentSlot = slotI;
+              preloadWindow(slotI);
             }
+            // Pinta em TODA atualização (posição fracionária): é o movimento
+            // sub-frame que mantém o rabo da inércia fluido, sem degrau.
+            // Desktop: draw imediato para o canvas cair no mesmo tick dos
+            // overlays GSAP. Touch: draw via RAF — no máximo uma pintura por
+            // frame é o que mantém o Safari estável em scroll rápido.
+            if (IS_TOUCH) scheduleFrame(slotF);
+            else          drawFrame(slotF);
           },
         });
 

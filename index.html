@@ -472,12 +472,23 @@
       // Sensitivity knob: lower PX_PER_FRAME on touch = each swipe covers more.
       // (NEVER use Lenis touchMultiplier for this — it crashes Safari.)
       const PX_PER_FRAME   = IS_TOUCH ? 9 : 30;
-      const PRELOAD_AHEAD  = IS_TOUCH ? 80 : 40;
-      const PRELOAD_BEHIND = IS_TOUCH ? 15 : 10;
-      const INITIAL_BATCH  = IS_TOUCH ? 50 : 30;
-      const CANVAS_SCALE   = 1.0;   // full res; syncTouch removed the need to downscale
+      const PRELOAD_AHEAD  = 40;
+      const PRELOAD_BEHIND = 10;
+      const INITIAL_BATCH  = 30;
+      // ORÇAMENTO DE MEMÓRIA iOS: frames decodificados vivem na RAM/GPU. O set
+      // completo em resolução total (240 × 720×1280 × 4B ≈ 885 MB) estoura o
+      // limite por aba do Safari e o iOS mata a página ("um problema ocorreu
+      // repetidamente"). No touch: 1 a cada 2 frames, decodificados a 75% —
+      // ~120 × 540×960 × 4B ≈ 250 MB. Como o playback é guiado pelo scroll,
+      // a menor cadência da fonte é imperceptível.
+      const FRAME_STEP     = IS_TOUCH ? 2 : 1;
+      const CANVAS_SCALE   = IS_TOUCH ? 0.75 : 1.0;
       const CANVAS_W       = Math.round(FRAME_W * CANVAS_SCALE);
       const CANVAS_H       = Math.round(FRAME_H * CANVAS_SCALE);
+      // slots: a lista de frames realmente usados; todo o engine indexa slots
+      const FRAME_INDICES  = [];
+      for (let i = 1; i <= TOTAL_FRAMES; i += FRAME_STEP) FRAME_INDICES.push(i);
+      const N_SLOTS        = FRAME_INDICES.length;
 
       if (IS_TOUCH) document.documentElement.classList.add('touch');
 
@@ -495,16 +506,17 @@
       const cache = new Map();
       let pendingFrame = null;
 
-      function loadFrame(index) {
-        if (index < 1 || index > TOTAL_FRAMES || cache.has(index)) return;
+      function loadFrame(slot) {
+        if (slot < 0 || slot >= N_SLOTS || cache.has(slot)) return;
         const img = new Image();
         const entry = { img, ready: false };
-        cache.set(index, entry);
+        cache.set(slot, entry);
         const markReady = (source) => {
           if (entry.ready) return;
           entry.source = source;
           entry.ready = true;
-          if (pendingFrame === index) { pendingFrame = null; scheduleFrame(index); }
+          entry.img = null; // release the Image; only the bitmap stays resident
+          if (pendingFrame === slot) { pendingFrame = null; scheduleFrame(slot); }
         };
         img.onload = () => {
           if (IS_TOUCH && window.createImageBitmap) {
@@ -516,7 +528,7 @@
             else markReady(img);
           }
         };
-        img.src = FRAME_PATH(index);
+        img.src = FRAME_PATH(FRAME_INDICES[slot]);
       }
 
       function preloadWindow(center) {
@@ -571,16 +583,16 @@
           loadingEl.style.opacity = '0';
           setTimeout(() => loadingEl.remove(), 500);
           document.body.classList.add('ready');
-          drawFrame(1);
+          drawFrame(0);
           initScroll();
         }
       }
 
-      for (let i = 1; i <= INITIAL_BATCH; i++) {
+      for (let s = 0; s < INITIAL_BATCH; s++) {
         const img = new Image();
         const entry = { img, ready: false };
-        cache.set(i, entry);
-        const done = (source) => { entry.source = source; entry.ready = true; onInitialLoad(); };
+        cache.set(s, entry);
+        const done = (source) => { entry.source = source; entry.ready = true; entry.img = null; onInitialLoad(); };
         img.onload = () => {
           if (IS_TOUCH && window.createImageBitmap) {
             createImageBitmap(img, {
@@ -593,10 +605,10 @@
         };
         img.onerror = () => {
           loadErrors++;
-          console.error('Frame não carregou:', FRAME_PATH(i));
+          console.error('Frame não carregou:', FRAME_PATH(FRAME_INDICES[s]));
           onInitialLoad();
         };
-        img.src = FRAME_PATH(i);
+        img.src = FRAME_PATH(FRAME_INDICES[s]);
       }
 
       // ═══════════════════════════════════════════════════════════════════════
@@ -606,7 +618,7 @@
         gsap.registerPlugin(ScrollTrigger);
         const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
 
-        let currentFrame = 1;
+        let currentSlot = 0;
 
         // syncTouch is THE iOS fix: keeps momentum scroll on the main thread so
         // it stays in sync with the canvas. NEVER add touchMultiplier (crashes
@@ -664,17 +676,17 @@
         ScrollTrigger.create({
           trigger: '#spacer', start: 'top top', end: 'bottom bottom', scrub: true,
           onUpdate(self) {
-            const target = Math.max(1, Math.min(TOTAL_FRAMES,
-              Math.round(1 + self.progress * (TOTAL_FRAMES - 1))));
-            if (target !== currentFrame) {
-              currentFrame = target;
-              preloadWindow(currentFrame);
+            const target = Math.max(0, Math.min(N_SLOTS - 1,
+              Math.round(self.progress * (N_SLOTS - 1))));
+            if (target !== currentSlot) {
+              currentSlot = target;
+              preloadWindow(currentSlot);
               // Desktop: draw immediately so the canvas lands on the same tick as
               // the GSAP overlays (kills the one-frame settle hitch). Touch: keep
               // the rAF-batched draw — capping to one full-res drawImage per frame
               // is what keeps Safari from overloading and crashing on fast scroll.
-              if (IS_TOUCH) scheduleFrame(currentFrame);
-              else          drawFrame(currentFrame);
+              if (IS_TOUCH) scheduleFrame(currentSlot);
+              else          drawFrame(currentSlot);
             }
           },
         });
@@ -776,12 +788,12 @@
         // pad timeline to exactly 1.0 so scrub maps 1:1 with frame progress
         tl.to({}, { duration: 0.0001 }, 1.0);
 
-        // Preload ALL remaining frames so none is ever missing at any scroll speed
+        // Preload ALL remaining slots so none is ever missing at any scroll speed
         (function sweep(start) {
-          const end = Math.min(start + 9, TOTAL_FRAMES);
-          for (let i = start; i <= end; i++) loadFrame(i);
-          if (end < TOTAL_FRAMES) setTimeout(() => sweep(end + 1), 40);
-        })(INITIAL_BATCH + 1);
+          const end = Math.min(start + 9, N_SLOTS - 1);
+          for (let s = start; s <= end; s++) loadFrame(s);
+          if (end < N_SLOTS - 1) setTimeout(() => sweep(end + 1), 40);
+        })(INITIAL_BATCH);
       }
     })();
   </script>

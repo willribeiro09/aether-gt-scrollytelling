@@ -100,11 +100,11 @@ No desktop, ↓/↑, PageDown/Up e espaço conduzem a apresentação pelas mesma
   estoura o limite por aba do Safari e o iOS mata a página ("um problema
   ocorreu repetidamente"). Cortar frames (step 2) resolvia a memória mas
   derrubava a cadência da fonte para 12 fps — sensação de FPS baixo. A solução
-  atual no touch: **todos os frames** (24 fps de fonte) a 75% de resolução,
-  com apenas uma **janela deslizante de ~70 frames decodificada por vez**
-  (~140 MB, verificado): fora dela os `ImageBitmap` são fechados e
-  redecodificados sob demanda — os WebP ficam no cache HTTP (aquecido em
-  levas no load) e o decode do iOS é por hardware.
+  atual no touch: **todos os frames em resolução nativa** (24 fps de fonte,
+  qualidade real do vídeo), com apenas uma **janela deslizante de ~70 frames
+  decodificada por vez** (~260 MB — folga tripla vs. o limite): fora dela os
+  `ImageBitmap` são fechados e redecodificados sob demanda — os WebP ficam no
+  cache HTTP (aquecido em levas no load) e o decode do iOS é por hardware.
 - **Crossfade adaptativo por velocidade**: o scroll mapeia para um slot
   fracionário; em movimento lento o canvas mescla os dois frames vizinhos
   (mata o degrau no fim da inércia), em movimento rápido mostra o frame mais
@@ -123,5 +123,5 @@ No desktop, ↓/↑, PageDown/Up e espaço conduzem a apresentação pelas mesma
 | Knob | Valor atual | Efeito |
 |---|---|---|
 | `PX_PER_FRAME` (touch) | 9 | Menor = cada swipe percorre mais vídeo |
-| `touchInertiaMultiplier` | 22 | Maior = mais deslize após soltar |
-| `syncTouchLerp` | 0.07 | Menor = acompanhamento mais fluido |
+| `touchInertiaMultiplier` | 8 lento / 30 rápido (adaptativo) | Maior = mais deslize após soltar |
+| `syncTouchLerp` | 0.16 lento / 0.06 rápido (adaptativo) | Menor = acompanhamento mais fluido |

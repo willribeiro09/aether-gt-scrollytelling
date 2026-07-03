@@ -472,8 +472,8 @@
       // Sensitivity knob: lower PX_PER_FRAME on touch = each swipe covers more.
       // (NEVER use Lenis touchMultiplier for this — it crashes Safari.)
       const PX_PER_FRAME   = IS_TOUCH ? 9 : 30;
-      const PRELOAD_AHEAD  = IS_TOUCH ? 48 : 40;
-      const PRELOAD_BEHIND = IS_TOUCH ? 12 : 10;
+      const PRELOAD_AHEAD  = 40;
+      const PRELOAD_BEHIND = 10;
       const INITIAL_BATCH  = 30;
       // ORÇAMENTO DE MEMÓRIA iOS: frames decodificados vivem na RAM/GPU. Manter
       // TODOS decodificados em resolução total (240 × 720×1280 × 4B ≈ 885 MB)
@@ -481,12 +481,12 @@
       // ocorreu repetidamente"). Cortar frames (step 2) resolvia a memória mas
       // derrubava a cadência da fonte p/ 12fps — sensação de FPS baixo.
       // Estratégia atual no touch: TODOS os frames (24fps de fonte, fluidez
-      // real) a 75% de resolução, mas só uma JANELA deslizante de ~70 frames
-      // decodificada por vez (~150 MB); fora dela os bitmaps são fechados e
-      // redecodificados sob demanda (o WebP fica no cache HTTP; o decode do
-      // iOS é por hardware e acompanha o scroll).
+      // real) em RESOLUÇÃO NATIVA, mas só uma JANELA deslizante de ~70 frames
+      // decodificada por vez (~260 MB — folga tripla vs. o limite que matava
+      // a página); fora dela os bitmaps são fechados e redecodificados sob
+      // demanda (o WebP fica no cache HTTP; o decode do iOS é por hardware).
       const FRAME_STEP     = 1;
-      const CANVAS_SCALE   = IS_TOUCH ? 0.75 : 1.0;
+      const CANVAS_SCALE   = 1.0;
       const CANVAS_W       = Math.round(FRAME_W * CANVAS_SCALE);
       const CANVAS_H       = Math.round(FRAME_H * CANVAS_SCALE);
       // slots: a lista de frames realmente usados; todo o engine indexa slots
@@ -694,8 +694,8 @@
           lerp:                   IS_TOUCH ? 0.12 : 0.08,
           smoothWheel:            true,
           syncTouch:              IS_TOUCH,
-          syncTouchLerp:          0.07,
-          touchInertiaMultiplier: 22,
+          syncTouchLerp:          0.06,
+          touchInertiaMultiplier: 30,
         });
         window.__lenis = lenis; // debug/deep-link handle
         lenis.on('scroll', ScrollTrigger.update);
@@ -821,8 +821,8 @@
             const win = samples.filter((s) => t - s[0] < 100);
             const v = win.length > 1
               ? Math.abs(y - win[0][1]) / Math.max(1, t - win[0][0]) : 0;
-            lenis.options.syncTouchLerp          = v < 0.35 ? 0.16 : 0.07;
-            lenis.options.touchInertiaMultiplier = v < 0.35 ? 5    : 22;
+            lenis.options.syncTouchLerp          = v < 0.35 ? 0.16 : 0.06;
+            lenis.options.touchInertiaMultiplier = v < 0.35 ? 8    : 30;
           }, { passive: true });
 
           window.addEventListener('touchend', () => {

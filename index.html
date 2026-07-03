@@ -1,0 +1,789 @@
+<!DOCTYPE html>
+<!--
+  AETHER GT — cinematic scrollytelling
+  Engine: canvas frame-sync + GSAP ScrollTrigger + Lenis (syncTouch iOS fix).
+
+  CONTENT LAYERS (safe to customize per project):
+   • palette CSS variables       (extracted from the video)
+   • .beat elements              (chapter typography, data-pos = vertical %)
+   • .anno elements              (annotations; add class "flip" to mirror label)
+   • beat(...) / annotation(...) calls in the choreography section
+
+  ENGINE (do not touch): loader, preload, draw, RAF batching, Lenis/touch
+  config. syncTouch is THE iOS fix. NEVER add touchMultiplier (crashes
+  Safari) — for more reach per swipe, lower PX_PER_FRAME instead.
+-->
+<html lang="pt-BR">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="theme-color" content="#06080b" />
+  <title>AETHER GT — O elétrico revelado</title>
+
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:wght@300;400;600&display=swap" rel="stylesheet" />
+
+  <style>
+    :root {
+      /* palette extracted from the video */
+      --ink:      #06080b;   /* studio darkness   */
+      --graphite: #12161d;   /* walls / body      */
+      --silver:   #c7ccd4;   /* paint highlights  */
+      --paper:    #f3f5f8;   /* headline white    */
+      --cyan:     #58dcd4;   /* x-ray wireframe   */
+      --blue:     #3fb5f0;   /* energy line cold  */
+      --ember:    #ff8a3d;   /* energy line hot   */
+    }
+
+    *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+    html, body { width: 100%; background: var(--ink); }
+    html { scrollbar-width: none; }
+    ::-webkit-scrollbar { width: 0; height: 0; }
+    body { font-family: 'Inter', -apple-system, 'Segoe UI', sans-serif; }
+
+    /* ── Cinematic background (fills letterbox bars, reacts to video light) ── */
+    #bg {
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      background:
+        radial-gradient(130% 90% at 50% 28%,
+          #171b22 0%, #0c0f14 48%, #050709 78%, #000 100%);
+      filter: brightness(0.7);
+      will-change: filter;
+    }
+    /* x-ray tint — the page itself shifts with the video's palette */
+    #tint {
+      position: fixed;
+      inset: 0;
+      z-index: -1;
+      opacity: 0;
+      pointer-events: none;
+      background:
+        radial-gradient(110% 80% at 50% 55%,
+          rgba(88, 220, 212, 0.10) 0%,
+          rgba(63, 181, 240, 0.05) 45%,
+          transparent 75%);
+      will-change: opacity;
+    }
+
+    /* ── Pinned stage ──────────────────────────────────────────────────────── */
+    #pin-container {
+      position: sticky;
+      top: 0;
+      width: 100%;
+      height: 100svh;
+      overflow: hidden;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+    }
+    /* On touch, fixed avoids iOS sticky-repaint jank during momentum scroll */
+    html.touch #pin-container {
+      position: fixed;
+      inset: 0;
+      height: 100svh;
+    }
+    #canvas {
+      display: block;
+      width: 100%;
+      height: 100%;
+      object-fit: contain;
+      position: relative;
+      z-index: 0;
+    }
+
+    /* ── Headlight bloom ───────────────────────────────────────────────────── */
+    #bloom {
+      position: absolute;
+      inset: 0;
+      z-index: 1;
+      pointer-events: none;
+      opacity: 0;
+      mix-blend-mode: screen;
+      background:
+        radial-gradient(42% 30% at 50% 50%,
+          rgba(214, 236, 255, 0.50) 0%,
+          rgba(160, 210, 245, 0.16) 36%,
+          rgba(110, 170, 220, 0.04) 62%,
+          transparent 74%);
+      will-change: opacity, transform;
+    }
+
+    /* ── Vignette ──────────────────────────────────────────────────────────── */
+    #vignette {
+      position: absolute;
+      inset: 0;
+      z-index: 2;
+      pointer-events: none;
+      background: radial-gradient(120% 100% at 50% 45%,
+        transparent 52%, rgba(0,0,0,0.5) 100%);
+    }
+
+    /* ── Film grain (static, nearly imperceptible) ─────────────────────────── */
+    #grain {
+      position: fixed;
+      inset: 0;
+      z-index: 40;
+      pointer-events: none;
+      opacity: 0.05;
+      background-image: url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='160' height='160'%3E%3Cfilter id='n'%3E%3CfeTurbulence type='fractalNoise' baseFrequency='0.9' numOctaves='2' stitchTiles='stitch'/%3E%3C/filter%3E%3Crect width='100%25' height='100%25' filter='url(%23n)' opacity='0.5'/%3E%3C/svg%3E");
+    }
+
+    /* ── Progress hairline ─────────────────────────────────────────────────── */
+    #progress {
+      position: fixed;
+      top: 0; left: 0;
+      width: 100%; height: 2px;
+      z-index: 50;
+      background: linear-gradient(90deg, var(--cyan), var(--blue));
+      transform: scaleX(0);
+      transform-origin: left center;
+      will-change: transform;
+      opacity: 0.85;
+    }
+
+    /* ── Scroll hint ───────────────────────────────────────────────────────── */
+    #hint {
+      position: fixed;
+      left: 50%; bottom: 84px;
+      transform: translateX(-50%);
+      z-index: 45;
+      display: flex; flex-direction: column; align-items: center; gap: 10px;
+      color: rgba(255,255,255,0.55);
+      font-size: 10px; font-weight: 600;
+      letter-spacing: 0.42em; text-transform: uppercase;
+      transition: opacity 0.6s ease;
+      pointer-events: none;
+    }
+    #hint .line {
+      width: 1px; height: 34px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.55), transparent);
+      animation: hint-drop 2.2s cubic-bezier(0.65, 0, 0.35, 1) infinite;
+      transform-origin: top center;
+    }
+    @keyframes hint-drop {
+      0%   { transform: scaleY(0); opacity: 0; }
+      35%  { transform: scaleY(1); opacity: 1; }
+      100% { transform: scaleY(1) translateY(14px); opacity: 0; }
+    }
+
+    /* ── Site chrome: header ───────────────────────────────────────────────── */
+    #site-header {
+      position: fixed; top: 0; left: 0; right: 0;
+      z-index: 48;
+      display: flex; align-items: center; justify-content: space-between;
+      padding: calc(16px + env(safe-area-inset-top)) 22px 16px;
+      background: linear-gradient(180deg, rgba(4,6,9,0.6), transparent);
+      opacity: 0; transition: opacity 0.9s ease 0.2s;
+      pointer-events: none;
+    }
+    body.ready #site-header { opacity: 1; }
+    #site-header .wordmark {
+      pointer-events: auto; cursor: pointer;
+      font-weight: 600; font-size: 13px;
+      letter-spacing: 0.5em; text-transform: uppercase;
+      color: var(--paper);
+    }
+    #site-header .wordmark b { color: var(--cyan); font-weight: 600; }
+    #cta-top {
+      pointer-events: auto; cursor: pointer;
+      font-family: inherit; font-weight: 600; font-size: 10px;
+      letter-spacing: 0.3em; text-transform: uppercase;
+      color: rgba(255,255,255,0.85);
+      padding: 10px 18px; border-radius: 999px;
+      background: rgba(255,255,255,0.06);
+      border: 1px solid rgba(255,255,255,0.16);
+      backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+      transition: border-color 0.3s, box-shadow 0.3s, transform 0.2s;
+    }
+    #cta-top:hover {
+      border-color: rgba(88,220,212,0.6);
+      box-shadow: 0 0 24px rgba(88,220,212,0.25);
+    }
+    #cta-top:active { transform: scale(0.96); }
+
+    /* ── Site chrome: chapter rail (right edge) ────────────────────────────── */
+    #rail {
+      position: fixed; right: 14px; top: 50%;
+      transform: translateY(-50%);
+      z-index: 47;
+      display: flex; flex-direction: column; gap: 12px;
+      opacity: 0; transition: opacity 0.9s ease 0.4s;
+      pointer-events: none;
+    }
+    body.ready #rail { opacity: 1; }
+    #rail i {
+      width: 3px; height: 14px; border-radius: 2px;
+      background: rgba(255,255,255,0.18);
+      transition: background 0.35s, height 0.35s, box-shadow 0.35s;
+    }
+    #rail i.on {
+      background: var(--cyan); height: 26px;
+      box-shadow: 0 0 10px rgba(88,220,212,0.6);
+    }
+
+    /* ── Site chrome: chapter HUD (bottom left) ────────────────────────────── */
+    #hud {
+      position: fixed; left: 22px;
+      bottom: calc(20px + env(safe-area-inset-bottom));
+      z-index: 47;
+      display: flex; align-items: baseline; gap: 10px;
+      opacity: 0; transition: opacity 0.9s ease 0.4s;
+      pointer-events: none;
+    }
+    body.ready #hud { opacity: 1; }
+    #hud .num {
+      font-weight: 300; font-size: 22px;
+      color: var(--paper); letter-spacing: 0.05em;
+    }
+    #hud .name {
+      font-weight: 600; font-size: 9px;
+      letter-spacing: 0.34em; text-transform: uppercase;
+      color: rgba(255,255,255,0.5);
+    }
+
+    /* ── Final CTAs ────────────────────────────────────────────────────────── */
+    .cta-final {
+      pointer-events: auto; cursor: pointer;
+      margin-top: 28px;
+      font-family: inherit; font-weight: 600; font-size: 11px;
+      letter-spacing: 0.3em; text-transform: uppercase;
+      color: #041014;
+      padding: 15px 32px; border: 0; border-radius: 999px;
+      background: linear-gradient(135deg, var(--cyan), var(--blue));
+      box-shadow: 0 0 32px rgba(88,220,212,0.35);
+      transition: box-shadow 0.3s, transform 0.2s;
+    }
+    .cta-final:hover { box-shadow: 0 0 48px rgba(88,220,212,0.55); }
+    .cta-final:active { transform: scale(0.96); }
+    .cta-replay {
+      pointer-events: auto; cursor: pointer;
+      display: block; margin: 18px auto 0;
+      font-family: inherit; font-weight: 600; font-size: 10px;
+      letter-spacing: 0.3em; text-transform: uppercase;
+      color: rgba(255,255,255,0.45);
+      padding: 8px; border: 0; background: none;
+      transition: color 0.3s;
+    }
+    .cta-replay:hover { color: rgba(255,255,255,0.85); }
+
+    /* ── Annotation overlay (tracks the real image rectangle) ──────────────── */
+    #overlay {
+      position: absolute;
+      z-index: 3;
+      pointer-events: none;
+    }
+    .anno { position: absolute; opacity: 0; will-change: opacity; }
+    .anno-dot {
+      position: absolute; left: 0; top: 0;
+      width: 7px; height: 7px; border-radius: 50%;
+      background: var(--cyan); box-shadow: 0 0 14px rgba(88, 220, 212, 0.9);
+      transform: translate(-50%, -50%);
+    }
+    .anno-line {
+      position: absolute; left: 0; top: -0.5px;
+      height: 1px; width: 58px;
+      background: linear-gradient(90deg, rgba(88,220,212,0.8), rgba(88,220,212,0.05));
+      transform-origin: left center;
+      transform: scaleX(0);
+      will-change: transform;
+    }
+    .anno-label {
+      position: absolute; left: 66px; top: 50%;
+      transform: translateY(-50%);
+      white-space: nowrap;
+      font-weight: 600; font-size: 11px; letter-spacing: 0.16em;
+      text-transform: uppercase; color: rgba(255,255,255,0.92);
+      padding: 7px 12px; border-radius: 7px;
+      background: rgba(10, 16, 20, 0.35);
+      backdrop-filter: blur(6px); -webkit-backdrop-filter: blur(6px);
+      border: 1px solid rgba(88, 220, 212, 0.18);
+    }
+    /* mirrored variant — line and label extend to the LEFT of the dot */
+    .anno.flip .anno-line {
+      left: auto; right: 0;
+      transform-origin: right center;
+      background: linear-gradient(270deg, rgba(88,220,212,0.8), rgba(88,220,212,0.05));
+    }
+    .anno.flip .anno-label { left: auto; right: 66px; }
+
+    /* ── Typographic beats ─────────────────────────────────────────────────── */
+    #type-layer { position: absolute; inset: 0; z-index: 4; pointer-events: none; }
+    .beat {
+      position: absolute; left: 50%; top: 50%;
+      transform: translate(-50%, -50%); /* fallback before GSAP sets xPercent/yPercent */
+      width: min(92vw, 1000px);
+      text-align: center;
+      opacity: 0;
+      will-change: opacity, transform, filter;
+    }
+    /* soft scrim behind text — premium, not frosted */
+    .beat::before {
+      content: ''; position: absolute; left: 50%; top: 50%;
+      transform: translate(-50%, -50%);
+      width: 150%; height: 320%;
+      background: radial-gradient(50% 50% at 50% 50%, rgba(0,0,0,0.42), transparent 70%);
+      z-index: -1;
+    }
+    .beat .eyebrow {
+      font-weight: 600; font-size: clamp(10px, 1.1vw, 12px);
+      letter-spacing: 0.42em; text-transform: uppercase;
+      color: rgba(255,255,255,0.5);
+      margin-bottom: 20px;
+    }
+    .beat h2 {
+      font-weight: 300;
+      font-size: clamp(44px, 9vw, 96px);
+      line-height: 0.98; letter-spacing: -0.025em;
+      color: var(--paper);
+    }
+    .beat .sub {
+      margin-top: 18px;
+      font-weight: 300; font-size: clamp(13px, 1.5vw, 17px);
+      letter-spacing: 0.14em; color: rgba(255,255,255,0.55);
+      text-transform: uppercase;
+    }
+    /* accent eyebrows during the technical chapter */
+    .beat.tech .eyebrow { color: rgba(88, 220, 212, 0.75); }
+    /* final hero headline — silver gradient ink */
+    #beat-final h2 {
+      background: linear-gradient(180deg, #ffffff 0%, var(--silver) 55%, #7e8894 100%);
+      -webkit-background-clip: text; background-clip: text;
+      -webkit-text-fill-color: transparent; color: transparent;
+    }
+
+    #loading {
+      position: fixed; inset: 0; background: var(--ink);
+      display: flex; flex-direction: column; gap: 18px;
+      align-items: center; justify-content: center;
+      color: rgba(255,255,255,0.7); font-size: 12px; letter-spacing: 0.42em;
+      text-transform: uppercase; z-index: 100;
+      transition: opacity 0.5s ease;
+    }
+    #loading .bar {
+      width: 120px; height: 1px; overflow: hidden;
+      background: rgba(255,255,255,0.12);
+    }
+    #loading .bar i {
+      display: block; width: 40%; height: 100%;
+      background: linear-gradient(90deg, transparent, var(--cyan), transparent);
+      animation: load-sweep 1.1s ease-in-out infinite;
+    }
+    @keyframes load-sweep {
+      from { transform: translateX(-100%); }
+      to   { transform: translateX(350%); }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      .beat, #bloom { filter: none !important; }
+      #hint .line { animation: none; }
+    }
+  </style>
+</head>
+<body>
+  <div id="bg"></div>
+  <div id="tint"></div>
+  <div id="grain"></div>
+  <div id="progress"></div>
+  <div id="loading"><span>Aether</span><span class="bar"><i></i></span></div>
+  <div id="hint"><span class="line"></span><span>Deslize</span></div>
+
+  <header id="site-header">
+    <span class="wordmark" id="wordmark">Aether <b>GT</b></span>
+    <button id="cta-top">Reservar</button>
+  </header>
+  <nav id="rail" aria-hidden="true">
+    <i></i><i></i><i></i><i></i><i></i><i></i><i></i>
+  </nav>
+  <div id="hud" aria-hidden="true">
+    <span class="num">01</span><span class="name">Escurid&atilde;o</span>
+  </div>
+
+  <div id="spacer">
+    <div id="pin-container">
+      <canvas id="canvas"></canvas>
+      <div id="bloom"></div>
+      <div id="vignette"></div>
+
+      <!-- Annotations over the powertrain (x-ray chapter, one at a time) -->
+      <div id="overlay">
+        <div class="anno" id="anno-battery" style="left:32%; top:64%;">
+          <span class="anno-line"></span><span class="anno-dot"></span>
+          <span class="anno-label">Bateria &middot; 118 kWh</span>
+        </div>
+        <div class="anno flip" id="anno-motor" style="left:72%; top:57%;">
+          <span class="anno-line"></span><span class="anno-dot"></span>
+          <span class="anno-label">Motor duplo &middot; 750 cv</span>
+        </div>
+        <div class="anno" id="anno-regen" style="left:26%; top:71%;">
+          <span class="anno-line"></span><span class="anno-dot"></span>
+          <span class="anno-label">Regenera&ccedil;&atilde;o ativa</span>
+        </div>
+      </div>
+
+      <!-- Chapter typography. data-pos = vertical % (low = top, high = bottom) -->
+      <div id="type-layer">
+        <div class="beat" data-pos="26" id="beat-intro">
+          <div class="eyebrow">Aether Automotive</div>
+          <h2>Da escurid&atilde;o.</h2>
+        </div>
+        <div class="beat" data-pos="78" id="beat-reveal">
+          <div class="eyebrow">O despertar</div>
+          <h2>Luz.</h2>
+        </div>
+        <div class="beat" data-pos="14" id="beat-design">
+          <div class="eyebrow">Escultura em movimento</div>
+          <h2>Forma.</h2>
+        </div>
+        <div class="beat tech" data-pos="12" id="beat-xray">
+          <div class="eyebrow">Al&eacute;m da superf&iacute;cie</div>
+          <h2>Raio-X.</h2>
+        </div>
+        <div class="beat" data-pos="80" id="beat-solid">
+          <div class="eyebrow">Um s&oacute; corpo</div>
+          <h2>&Iacute;ntegro.</h2>
+        </div>
+        <div class="beat" data-pos="70" id="beat-final">
+          <div class="eyebrow">Aether GT</div>
+          <h2>Conduza o futuro.</h2>
+          <div class="sub">100% el&eacute;trico &middot; 750 cv &middot; 118 kWh</div>
+          <button class="cta-final" id="cta-final">Reservar unidade</button>
+          <button class="cta-replay" id="cta-replay">&#8635; Assistir novamente</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/@studio-freight/lenis@1.0.42/dist/lenis.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/gsap.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/gsap@3.12.5/dist/ScrollTrigger.min.js"></script>
+
+  <script>
+    (() => {
+      // ═══════════════════════════════════════════════════════════════════════
+      //  FRAME SYNC ENGINE — proven, do not break
+      // ═══════════════════════════════════════════════════════════════════════
+      const TOTAL_FRAMES   = 240;   // 10s × 24fps
+      const FRAME_W        = 720;
+      const FRAME_H        = 1280;
+      const IS_TOUCH       = matchMedia('(max-width: 768px), (pointer: coarse)').matches;
+      // Sensitivity knob: lower PX_PER_FRAME on touch = each swipe covers more.
+      // (NEVER use Lenis touchMultiplier for this — it crashes Safari.)
+      const PX_PER_FRAME   = IS_TOUCH ? 9 : 30;
+      const PRELOAD_AHEAD  = IS_TOUCH ? 80 : 40;
+      const PRELOAD_BEHIND = IS_TOUCH ? 15 : 10;
+      const INITIAL_BATCH  = IS_TOUCH ? 50 : 30;
+      const CANVAS_SCALE   = 1.0;   // full res; syncTouch removed the need to downscale
+      const CANVAS_W       = Math.round(FRAME_W * CANVAS_SCALE);
+      const CANVAS_H       = Math.round(FRAME_H * CANVAS_SCALE);
+
+      if (IS_TOUCH) document.documentElement.classList.add('touch');
+
+      const FRAME_PATH = (n) =>
+        `frames/frame_${String(n).padStart(4, '0')}.webp`;
+
+      document.getElementById('spacer').style.height =
+        `calc(100svh + ${TOTAL_FRAMES * PX_PER_FRAME}px)`;
+
+      const canvas = document.getElementById('canvas');
+      const ctx    = canvas.getContext('2d', { alpha: false });
+      canvas.width  = CANVAS_W;
+      canvas.height = CANVAS_H;
+
+      const cache = new Map();
+      let pendingFrame = null;
+
+      function loadFrame(index) {
+        if (index < 1 || index > TOTAL_FRAMES || cache.has(index)) return;
+        const img = new Image();
+        const entry = { img, ready: false };
+        cache.set(index, entry);
+        const markReady = (source) => {
+          if (entry.ready) return;
+          entry.source = source;
+          entry.ready = true;
+          if (pendingFrame === index) { pendingFrame = null; scheduleFrame(index); }
+        };
+        img.onload = () => {
+          if (IS_TOUCH && window.createImageBitmap) {
+            createImageBitmap(img, {
+              resizeWidth: CANVAS_W, resizeHeight: CANVAS_H, resizeQuality: 'medium'
+            }).then(markReady).catch(() => markReady(img));
+          } else {
+            if (img.decode) img.decode().then(() => markReady(img)).catch(() => markReady(img));
+            else markReady(img);
+          }
+        };
+        img.src = FRAME_PATH(index);
+      }
+
+      function preloadWindow(center) {
+        for (let i = center - PRELOAD_BEHIND; i <= center + PRELOAD_AHEAD; i++) loadFrame(i);
+        if (!IS_TOUCH) {
+          for (const [key] of cache) {
+            if (key < center - PRELOAD_BEHIND - 5 || key > center + PRELOAD_AHEAD + 5) {
+              cache.delete(key);
+            }
+          }
+        }
+      }
+
+      // RAF-batched draw: at most one drawImage per animation frame.
+      let _rafTarget = null;
+      let _rafPending = false;
+      function scheduleFrame(index) {
+        _rafTarget = index;
+        if (_rafPending) return;
+        _rafPending = true;
+        requestAnimationFrame(() => {
+          _rafPending = false;
+          const entry = cache.get(_rafTarget);
+          if (!entry || !entry.ready) { pendingFrame = _rafTarget; return; }
+          if (pendingFrame === _rafTarget) pendingFrame = null;
+          ctx.drawImage(entry.source, 0, 0, CANVAS_W, CANVAS_H);
+        });
+      }
+
+      function drawFrame(index) {
+        const entry = cache.get(index);
+        if (!entry || !entry.ready) { pendingFrame = index; return; }
+        if (pendingFrame === index) pendingFrame = null;
+        ctx.drawImage(entry.source, 0, 0, CANVAS_W, CANVAS_H);
+      }
+
+      let loaded = 0;
+      let loadErrors = 0;
+      const loadingEl = document.getElementById('loading');
+      function onInitialLoad() {
+        loaded++;
+        if (loaded >= INITIAL_BATCH) {
+          if (loadErrors >= INITIAL_BATCH) {
+            // frames unreachable — say so instead of a silent black canvas
+            loadingEl.innerHTML =
+              '<span style="letter-spacing:0.1em; text-transform:none; max-width:80vw; text-align:center; line-height:1.7;">' +
+              'N&atilde;o foi poss&iacute;vel carregar <code>frames/</code>.<br>' +
+              'Abra via servidor HTTP: <code>npx serve .</code> &rarr; http://localhost:3000<br>' +
+              '(abrir o arquivo direto com file:// n&atilde;o funciona)</span>';
+            return;
+          }
+          loadingEl.style.opacity = '0';
+          setTimeout(() => loadingEl.remove(), 500);
+          document.body.classList.add('ready');
+          drawFrame(1);
+          initScroll();
+        }
+      }
+
+      for (let i = 1; i <= INITIAL_BATCH; i++) {
+        const img = new Image();
+        const entry = { img, ready: false };
+        cache.set(i, entry);
+        const done = (source) => { entry.source = source; entry.ready = true; onInitialLoad(); };
+        img.onload = () => {
+          if (IS_TOUCH && window.createImageBitmap) {
+            createImageBitmap(img, {
+              resizeWidth: CANVAS_W, resizeHeight: CANVAS_H, resizeQuality: 'medium'
+            }).then(done).catch(() => done(img));
+          } else {
+            if (img.decode) img.decode().then(() => done(img)).catch(() => done(img));
+            else done(img);
+          }
+        };
+        img.onerror = () => {
+          loadErrors++;
+          console.error('Frame não carregou:', FRAME_PATH(i));
+          onInitialLoad();
+        };
+        img.src = FRAME_PATH(i);
+      }
+
+      // ═══════════════════════════════════════════════════════════════════════
+      //  PRESENTATION LAYER — choreographed to the video's real moments
+      // ═══════════════════════════════════════════════════════════════════════
+      function initScroll() {
+        gsap.registerPlugin(ScrollTrigger);
+        const reduced = matchMedia('(prefers-reduced-motion: reduce)').matches;
+
+        let currentFrame = 1;
+
+        // syncTouch is THE iOS fix: keeps momentum scroll on the main thread so
+        // it stays in sync with the canvas. NEVER add touchMultiplier (crashes
+        // Safari). Tune feel via touchInertiaMultiplier (life) + syncTouchLerp.
+        const lenis = new Lenis({
+          lerp:                   IS_TOUCH ? 0.12 : 0.08,
+          smoothWheel:            true,
+          syncTouch:              IS_TOUCH,
+          syncTouchLerp:          0.07,
+          touchInertiaMultiplier: 22,
+        });
+        window.__lenis = lenis; // debug/deep-link handle
+        lenis.on('scroll', ScrollTrigger.update);
+        gsap.ticker.add((t) => lenis.raf(t * 1000));
+        gsap.ticker.lagSmoothing(0);
+
+        // scroll hint dissolves on first movement
+        const hint = document.getElementById('hint');
+        lenis.on('scroll', ({ scroll }) => {
+          if (scroll > 30 && hint.style.opacity !== '0') hint.style.opacity = '0';
+          else if (scroll <= 30 && hint.style.opacity === '0') hint.style.opacity = '1';
+        });
+
+        // site chrome: chapter HUD + rail
+        const CHAPTERS = [
+          'Escuridão', 'Luz', 'Forma', 'Raio-X', 'Powertrain', 'Íntegro', 'Futuro'
+        ];
+        const CHAPTER_AT = [0, 0.08, 0.24, 0.44, 0.57, 0.81, 0.895];
+        const hudNum   = document.querySelector('#hud .num');
+        const hudName  = document.querySelector('#hud .name');
+        const railDots = document.querySelectorAll('#rail i');
+        let chapterIdx = -1;
+        function updateChapter(p) {
+          let i = CHAPTER_AT.length - 1;
+          while (i > 0 && p < CHAPTER_AT[i]) i--;
+          if (i === chapterIdx) return;
+          chapterIdx = i;
+          hudNum.textContent  = String(i + 1).padStart(2, '0');
+          hudName.textContent = CHAPTERS[i];
+          railDots.forEach((d, j) => d.classList.toggle('on', j === i));
+        }
+        updateChapter(0);
+        ScrollTrigger.create({
+          trigger: '#spacer', start: 'top top', end: 'bottom bottom',
+          onUpdate: (self) => updateChapter(self.progress),
+        });
+
+        // site chrome: CTA wiring
+        const scrollMax = () => document.documentElement.scrollHeight - innerHeight;
+        document.getElementById('wordmark').addEventListener('click', () => lenis.scrollTo(0));
+        document.getElementById('cta-top').addEventListener('click', () => lenis.scrollTo(scrollMax()));
+        document.getElementById('cta-final').addEventListener('click', () => lenis.scrollTo(scrollMax()));
+        document.getElementById('cta-replay').addEventListener('click', () => lenis.scrollTo(0));
+
+        ScrollTrigger.create({
+          trigger: '#spacer', start: 'top top', end: 'bottom bottom', scrub: true,
+          onUpdate(self) {
+            const target = Math.max(1, Math.min(TOTAL_FRAMES,
+              Math.round(1 + self.progress * (TOTAL_FRAMES - 1))));
+            if (target !== currentFrame) {
+              currentFrame = target;
+              preloadWindow(currentFrame);
+              // Desktop: draw immediately so the canvas lands on the same tick as
+              // the GSAP overlays (kills the one-frame settle hitch). Touch: keep
+              // the rAF-batched draw — capping to one full-res drawImage per frame
+              // is what keeps Safari from overloading and crashing on fast scroll.
+              if (IS_TOUCH) scheduleFrame(currentFrame);
+              else          drawFrame(currentFrame);
+            }
+          },
+        });
+
+        // Anchor annotation overlay to the real (object-fit: contain) image rect
+        const pin = document.getElementById('pin-container');
+        const overlay = document.getElementById('overlay');
+        const AR = FRAME_W / FRAME_H;
+        function updateOverlay() {
+          const cw = pin.clientWidth, ch = pin.clientHeight;
+          let w, h;
+          if (cw / ch > AR) { h = ch; w = ch * AR; } else { w = cw; h = cw / AR; }
+          overlay.style.left   = (cw - w) / 2 + 'px';
+          overlay.style.top    = (ch - h) / 2 + 'px';
+          overlay.style.width  = w + 'px';
+          overlay.style.height = h + 'px';
+        }
+        updateOverlay();
+        ScrollTrigger.addEventListener('refreshInit', updateOverlay);
+        window.addEventListener('resize', updateOverlay);
+
+        const blur = reduced ? 'blur(0px)' : 'blur(14px)';
+
+        // Center beats via xPercent/yPercent so animating y doesn't clobber the
+        // -50%/-50% centering. data-pos sets each beat's vertical placement.
+        gsap.set('.beat', { xPercent: -50, yPercent: -50 });
+        document.querySelectorAll('.beat').forEach((b) => {
+          if (b.dataset.pos) b.style.top = b.dataset.pos + '%';
+        });
+
+        const tl = gsap.timeline({
+          defaults: { ease: 'power2.out' },
+          scrollTrigger: { trigger: '#spacer', start: 'top top', end: 'bottom bottom', scrub: true },
+        });
+
+        function beat(sel, tIn, tOut, opts = {}) {
+          const el = document.querySelector(sel);
+          const yIn  = opts.yIn  ?? 36;
+          const yOut = opts.yOut ?? -36;
+          tl.fromTo(el,
+            { opacity: 0, y: yIn, filter: blur },
+            { opacity: 1, y: 0, filter: 'blur(0px)', duration: 0.05 }, tIn);
+          if (tOut != null) {
+            tl.to(el,
+              { opacity: 0, y: yOut, filter: blur, duration: 0.05, ease: 'power2.in' }, tOut);
+          }
+        }
+
+        function annotation(id, tIn, tOut) {
+          tl.fromTo(`#${id}`, { opacity: 0 }, { opacity: 1, duration: 0.012 }, tIn);
+          tl.fromTo(`#${id} .anno-line`, { scaleX: 0 }, { scaleX: 1, duration: 0.04, ease: 'power3.out' }, tIn + 0.004);
+          tl.fromTo(`#${id} .anno-label`, { opacity: 0 }, { opacity: 1, duration: 0.03 }, tIn + 0.014);
+          tl.fromTo(`#${id} .anno-dot`,   { opacity: 0 }, { opacity: 1, duration: 0.02 }, tIn);
+          tl.to(`#${id}`, { opacity: 0, duration: 0.018, ease: 'power1.in' }, tOut);
+        }
+
+        // ──────────────────────────────────────────────────────────────────────
+        //  CHOREOGRAPHY — progress values mapped to the video's real moments
+        //  (frame ≈ progress × 240)
+        // ──────────────────────────────────────────────────────────────────────
+
+        // progress hairline tracks the whole journey
+        tl.fromTo('#progress', { scaleX: 0 }, { scaleX: 1, duration: 1, ease: 'none' }, 0);
+
+        // CH 1 · f1–19 · darkness, silhouette
+        beat('#beat-intro', 0.015, 0.075, { yIn: 26 });
+
+        // CH 2 · f19–48 · headlights ignite → page ambient light rises with them
+        tl.fromTo('#bloom', { opacity: 0 }, { opacity: 0.55, duration: 0.05, ease: 'power2.out' }, 0.085);
+        tl.to('#bloom', { opacity: 0, duration: 0.07, ease: 'power1.in' }, 0.16);
+        tl.to('#bg', { filter: 'brightness(0.95)', duration: 0.22, ease: 'none' }, 0.08);
+        beat('#beat-reveal', 0.10, 0.20, { yIn: 34 });
+
+        // CH 3 · f60–100 · orbit, sculptural body — text only, visual silence after
+        beat('#beat-design', 0.26, 0.40, { yIn: 40 });
+
+        // CH 4 · f108–134 · x-ray transition — the page tints cyan with the video
+        tl.to('#tint', { opacity: 1, duration: 0.08, ease: 'none' }, 0.46);
+        beat('#beat-xray', 0.45, 0.555, { yIn: 44 });
+
+        // CH 5 · f140–192 · powertrain — annotations, one at a time
+        annotation('anno-battery', 0.585, 0.655);
+        annotation('anno-motor',   0.665, 0.730);
+        annotation('anno-regen',   0.740, 0.795);
+        tl.to('#tint', { opacity: 0, duration: 0.07, ease: 'none' }, 0.80);
+
+        // CH 6 · f197–214 · solidified, side profile
+        beat('#beat-solid', 0.82, 0.885, { yIn: 38 });
+
+        // CH 7 · f216–240 · final hero — ambient lift + bloom + gradient headline
+        tl.to('#bg', { filter: 'brightness(1.16)', duration: 0.1, ease: 'power2.out' }, 0.90);
+        tl.fromTo('#bloom',
+          { opacity: 0, scale: 0.75 },
+          { opacity: 1, scale: 1, duration: 0.09, ease: 'power2.out' }, 0.91);
+        tl.fromTo('#beat-final',
+          { opacity: 0, y: 34, filter: blur },
+          { opacity: 1, y: 0, filter: 'blur(0px)', duration: 0.07 }, 0.905);
+
+        // pad timeline to exactly 1.0 so scrub maps 1:1 with frame progress
+        tl.to({}, { duration: 0.0001 }, 1.0);
+
+        // Preload ALL remaining frames so none is ever missing at any scroll speed
+        (function sweep(start) {
+          const end = Math.min(start + 9, TOTAL_FRAMES);
+          for (let i = start; i <= end; i++) loadFrame(i);
+          if (end < TOTAL_FRAMES) setTimeout(() => sweep(end + 1), 40);
+        })(INITIAL_BATCH + 1);
+      }
+    })();
+  </script>
+</body>
+</html>

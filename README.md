@@ -112,6 +112,11 @@ No desktop, ↓/↑, PageDown/Up e espaço conduzem a apresentação pelas mesma
   Transição por smoothstep entre `V_LO = 0.15` e `V_HI = 0.45` slots/frame,
   com média móvel para não tremular. Debug: `window.__paint` (v, w, f) e
   `window.__cacheSize()`.
+- **Focus settle + curva-S**: a mescla só existe **em movimento**. Quando o
+  scroll repousa (>140 ms), o resíduo fracionário é dissolvido até o frame
+  inteiro mais próximo (~200 ms) — parado, a imagem é sempre 100% nítida,
+  sem "vulto". Durante o movimento lento, uma curva-S na fração atravessa
+  rápido a zona turva do 50/50 e demora nos frames puros.
 
 ### Knobs de sensação
 

@@ -568,6 +568,7 @@
       let _rafTarget  = 0;
       let _rafPending = false;
       let lastSlotF   = 0;
+      let lastScrollT = 0; // última pintura vinda de scroll real (p/ settle)
       let _prevSlotF  = 0, _prevT = 0, _vEma = 0;
 
       function paint(slotF) {
@@ -593,7 +594,10 @@
         const i0 = Math.max(0, Math.min(N_SLOTS - 1, Math.floor(slotF)));
         const i1 = Math.min(N_SLOTS - 1, i0 + 1);
         const fRaw = slotF - i0;
-        const f = fRaw * w + Math.round(fRaw) * (1 - w);
+        let f = fRaw * w + Math.round(fRaw) * (1 - w);
+        // curva-S: atravessa rápido a zona turva do 50/50 e demora nos frames
+        // puros — menos "vulto" durante o movimento lento
+        f = f * f * (3 - 2 * f);
         window.__paint = { v: +_vEma.toFixed(4), w: +w.toFixed(3), f: +f.toFixed(3), slotF: +slotF.toFixed(2) };
         const e0 = cache.get(i0), e1 = cache.get(i1);
         const r0 = e0 && e0.ready, r1 = e1 && e1.ready;
@@ -697,6 +701,17 @@
         lenis.on('scroll', ScrollTrigger.update);
         gsap.ticker.add((t) => lenis.raf(t * 1000));
         gsap.ticker.lagSmoothing(0);
+
+        // FOCUS SETTLE: quando o scroll repousa, dissolve o resíduo fracionário
+        // do crossfade até o frame inteiro mais próximo (~200ms) — parado, a
+        // imagem é SEMPRE 100% nítida; a mescla só existe em movimento.
+        gsap.ticker.add(() => {
+          if (performance.now() - lastScrollT < 140) return;
+          const r = Math.round(lastSlotF);
+          const d = r - lastSlotF;
+          if (Math.abs(d) < 0.005) return;
+          paint(lastSlotF + d * 0.18);
+        });
 
         // scroll hint dissolves on first movement
         const hint = document.getElementById('hint');
@@ -860,6 +875,7 @@
             // Desktop: draw imediato para o canvas cair no mesmo tick dos
             // overlays GSAP. Touch: draw via RAF — no máximo uma pintura por
             // frame é o que mantém o Safari estável em scroll rápido.
+            lastScrollT = performance.now();
             if (IS_TOUCH) scheduleFrame(slotF);
             else          drawFrame(slotF);
           },

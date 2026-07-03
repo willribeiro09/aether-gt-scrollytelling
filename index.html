@@ -673,6 +673,115 @@
         document.getElementById('cta-final').addEventListener('click', () => lenis.scrollTo(scrollMax()));
         document.getElementById('cta-replay').addEventListener('click', () => lenis.scrollTo(0));
 
+        // ─────────────────────────────────────────────────────────────────────
+        //  GESTURE INTENT — interpreta a intenção do gesto, não só os pixels.
+        //  Story Mode: flick decidido (monotônico, rápido no release) → glide
+        //  cinematográfico até a próxima âncora narrativa.
+        //  Explore Mode: dedo lento, curto ou oscilando → inércia adaptativa
+        //  (quase zero quando lento) + acompanhamento mais direto do dedo,
+        //  para precisão de frame. Sem botões: classificado a cada gesto.
+        // ─────────────────────────────────────────────────────────────────────
+        // Âncoras = pontos de descanso da narrativa (beat/anotação plenamente
+        // visível). Progresso 0–1, alinhado à coreografia acima.
+        const ANCHORS = [0, 0.07, 0.175, 0.35, 0.52, 0.62, 0.70, 0.775, 0.875, 1];
+        const progressNow = () => (lenis.scroll ?? scrollY) / Math.max(1, scrollMax());
+        let glideActive = false;
+
+        function cancelGlide() {
+          if (!glideActive) return;
+          glideActive = false;
+          // congela onde está; o dedo do usuário assume dali
+          lenis.scrollTo(lenis.scroll ?? scrollY, { immediate: true });
+        }
+
+        function nextAnchor(p, dir) {
+          if (dir > 0) {
+            for (const a of ANCHORS) if (a > p + 0.015) return a;
+            return 1;
+          }
+          for (let i = ANCHORS.length - 1; i >= 0; i--) {
+            if (ANCHORS[i] < p - 0.015) return ANCHORS[i];
+          }
+          return 0;
+        }
+
+        function glideTo(pTarget) {
+          const dist = Math.abs(pTarget - progressNow());
+          glideActive = true;
+          lenis.scrollTo(pTarget * scrollMax(), {
+            duration: Math.min(2, 0.6 + dist * 6),
+            easing: (t) => 1 - Math.pow(1 - t, 4),
+            onComplete: () => { glideActive = false; },
+          });
+        }
+
+        if (IS_TOUCH) {
+          const FLICK_MIN_VEL  = 0.65; // px/ms no release = intenção de avançar
+          const FLICK_MIN_DIST = 24;   // px — ignora toques acidentais
+          let samples = [];            // [tempo, y] recentes do dedo
+          let dirChanges = 0, lastDy = 0;
+
+          window.addEventListener('touchstart', (e) => {
+            cancelGlide();
+            samples = [[performance.now(), e.touches[0].clientY]];
+            dirChanges = 0; lastDy = 0;
+          }, { passive: true });
+
+          window.addEventListener('touchmove', (e) => {
+            if (!samples.length) return;
+            const t = performance.now(), y = e.touches[0].clientY;
+            const dy = y - samples[samples.length - 1][1];
+            if (Math.abs(dy) > 2) { // deadzone p/ tremor natural do dedo
+              if (lastDy !== 0 && Math.sign(dy) !== Math.sign(lastDy)) dirChanges++;
+              lastDy = dy;
+            }
+            samples.push([t, y]);
+            if (samples.length > 24) samples.shift();
+            // velocidade instantânea (janela de 100ms) dita o comportamento
+            // ANTES do release: dedo lento = seguir direto e sem inércia
+            // (precisão de frame); dedo rápido = fluido e com vida.
+            const win = samples.filter((s) => t - s[0] < 100);
+            const v = win.length > 1
+              ? Math.abs(y - win[0][1]) / Math.max(1, t - win[0][0]) : 0;
+            lenis.options.syncTouchLerp          = v < 0.35 ? 0.16 : 0.07;
+            lenis.options.touchInertiaMultiplier = v < 0.35 ? 5    : 22;
+          }, { passive: true });
+
+          window.addEventListener('touchend', () => {
+            if (samples.length < 2) return;
+            const t = performance.now();
+            const y0 = samples[0][1];
+            const [tEnd, yEnd] = samples[samples.length - 1];
+            const disp = yEnd - y0;
+            const win = samples.filter((s) => t - s[0] < 120);
+            const vRel = win.length > 1
+              ? (yEnd - win[0][1]) / Math.max(1, tEnd - win[0][0]) : 0;
+
+            const isFlick = dirChanges === 0 &&
+              Math.abs(disp) >= FLICK_MIN_DIST && Math.abs(vRel) >= FLICK_MIN_VEL;
+
+            if (isFlick) {
+              // Story Mode — dedo p/ cima (disp<0) = avançar a narrativa
+              glideTo(nextAnchor(progressNow(), disp < 0 ? 1 : -1));
+            }
+            // Explore Mode: sem glide; a inércia adaptativa já foi definida
+            // durante o movimento, então o release lento para quase seco.
+            samples = [];
+          }, { passive: true });
+        }
+
+        // Desktop: setas / espaço conduzem a apresentação pelas mesmas âncoras
+        window.addEventListener('keydown', (e) => {
+          if (e.target !== document.body) return;
+          if (e.key === 'ArrowDown' || e.key === 'PageDown' || e.key === ' ') {
+            e.preventDefault(); glideTo(nextAnchor(progressNow(), 1));
+          } else if (e.key === 'ArrowUp' || e.key === 'PageUp') {
+            e.preventDefault(); glideTo(nextAnchor(progressNow(), -1));
+          }
+        });
+
+        window.__intent = { glideTo, nextAnchor, progressNow }; // debug handle
+
         ScrollTrigger.create({
           trigger: '#spacer', start: 'top top', end: 'bottom bottom', scrub: true,
           onUpdate(self) {

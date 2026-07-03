@@ -64,6 +64,25 @@ Nada na engine precisa ser tocado.
 | 0.82–0.89 | **Íntegro.** | Carro solidifica em perfil |
 | 0.90–1.00 | **Conduza o futuro.** | Hero frontal final (bloom + brilho máximo) |
 
+## Camada de intenção — Story Mode × Explore Mode
+
+A engine não responde só a pixels de scroll: ela classifica **cada gesto** no
+touch (velocidade de soltura, deslocamento, trocas de direção, oscilações) e
+alterna automaticamente entre dois comportamentos:
+
+- **Story Mode** — flick decidido (monotônico, ≥24 px, soltura ≥0,65 px/ms):
+  glide cinematográfico até a **próxima âncora narrativa** (array `ANCHORS`,
+  os pontos onde cada beat/anotação está plenamente visível). Duração
+  proporcional à distância, easing de desaceleração. Tocar na tela durante o
+  glide congela e devolve o controle imediatamente.
+- **Explore Mode** — dedo lento, movimento curto ou vai-e-volta: nenhum salto.
+  A inércia e o acompanhamento são **adaptativos durante o próprio gesto**
+  (dedo lento → `touchInertiaMultiplier` 5 e `syncTouchLerp` 0.16 = parada
+  seca e resposta direta, precisão de frame; dedo rápido → 22 / 0.07 = fluido).
+
+No desktop, ↓/↑, PageDown/Up e espaço conduzem a apresentação pelas mesmas
+âncoras. Ao trocar o vídeo, atualize `ANCHORS` junto com a coreografia.
+
 ## Performance — decisões não negociáveis
 
 - **`syncTouch: true` no Lenis** é O fix do iOS: traz o scroll de momentum para a
